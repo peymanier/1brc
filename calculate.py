@@ -1,4 +1,7 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
+
+from tqdm import tqdm
 
 
 @dataclass
@@ -7,27 +10,27 @@ class Station:
     temperature: float
 
 
-STATIONS: list[Station] = []
-
-
 def validate_measurement_row(row: str) -> tuple[str, float]:
     name, temperature = row.split(";")
-    if not isinstance(name, str):
-        raise ValueError('station name is not string')
 
-    try:
-        temperature = float(temperature)
-    except ValueError:
-        raise ValueError(f'temperature for station={name} is not correct {temperature=}') from None
+    # if not isinstance(name, str):
+    #     raise ValueError('station name is not string')
+    #
+    # try:
+    #     temperature = float(temperature)
+    # except ValueError:
+    #     raise ValueError(f'temperature for station={name} is not correct {temperature=}') from None
 
-    return name, temperature
+    # return name, temperature
+
+    return str(name), float(temperature)
 
 
-def read_measurements(filename: str):
+def read_measurements(filename: str) -> Iterator[Station]:
     with open(filename, mode='r') as f:
         for row in f:
             name, temperature = validate_measurement_row(row)
-            STATIONS.append(Station(name=name, temperature=temperature))
+            yield Station(name=name, temperature=temperature)
 
 
 @dataclass
@@ -38,9 +41,9 @@ class StationAggData:
     count: int
 
 
-def calc_measurements() -> dict[str, StationAggData]:
+def calc_measurements(stations: Iterator[Station]) -> dict[str, StationAggData]:
     result: dict[str, StationAggData] = dict()
-    for station in STATIONS:
+    for station in tqdm(stations, total=1_000_000_000):
         if station.name not in result:
             result[station.name] = StationAggData(
                 minimum=station.temperature,
@@ -72,8 +75,8 @@ def print_result(result: dict[str, StationAggData]) -> None:
 
 
 def main() -> int:
-    read_measurements("short_measurements.txt")
-    result = calc_measurements()
+    stations = read_measurements("measurements.txt")
+    result = calc_measurements(stations)
     print_result(result)
     return 0
 
