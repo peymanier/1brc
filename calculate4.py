@@ -100,10 +100,16 @@ def process_chunks(chunks):
     with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
         for future in concurrent.futures.as_completed(futures):
-            result = future.result()
+            chunk_result = future.result()
 
-            for name, chunk_aggregate in result.items():
-                current_aggregate = result[name]
+            for name, chunk_aggregate in chunk_result.items():
+                if name in result:
+                    current_aggregate = result[name]
+                else:
+                    current_aggregate = LocationAggregate(
+                        minimum=float('inf'), maximum=float('-inf'), current_sum=0.0, count=0
+                    )
+
                 if chunk_aggregate.maximum > current_aggregate.maximum:
                     current_aggregate.maximum = chunk_aggregate.maximum
                 if chunk_aggregate.minimum < current_aggregate.minimum:
