@@ -1,3 +1,4 @@
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -43,7 +44,7 @@ class StationAggData:
 
 def calc_measurements(stations: Iterator[Station]) -> dict[str, StationAggData]:
     result: dict[str, StationAggData] = dict()
-    for station in tqdm(stations, total=1_000_000_000):
+    for station in tqdm(stations, total=10_000_000):
         if station.name not in result:
             result[station.name] = StationAggData(
                 minimum=station.temperature,
@@ -75,9 +76,14 @@ def print_result(result: dict[str, StationAggData]) -> None:
 
 
 def main() -> int:
-    stations = read_measurements("measurements.txt")
+    start_time = time.perf_counter()
+
+    stations = read_measurements("measurements_medium.txt")
     result = calc_measurements(stations)
     print_result(result)
+
+    end_time = time.perf_counter()
+    print(f'{(end_time - start_time):.2f} seconds')
     return 0
 
 
