@@ -1,166 +1,146 @@
-import multiprocessing as mp
+import concurrent.futures
+import os
+import time
 from dataclasses import dataclass
 
-BATCH_SIZE = 1_000_000
-MAX_WORKERS = 10
-DONE = None
+FILE_NAME = "measurements_medium.txt"
 
 
 @dataclass
-class Station:
+class ChunkRange:
+    start: int
+    end: int
+
+
+@dataclass
+class LocationTemperature:
     name: str
-    temperature: float
+    measurement: float
 
 
 @dataclass
-class StationAggData:
+class LocationAggregate:
     minimum: float
     maximum: float
     current_sum: float
     count: int
 
 
-Result = dict[str, StationAggData]
+def get_chunks() -> list[ChunkRange]:
+    file_size = os.path.getsize(FILE_NAME)
+    chunk_size = file_size // os.cpu_count()
+
+    def is_new_line(pos):
+        if pos == 0:
+            return True
+
+        f.seek(pos - 1)
+        return f.read(1) == b'\n'
+
+    def next_line(pos):
+        f.seek(pos)
+        f.readline()
+        return f.tell()
+
+    chunks: list[ChunkRange] = []
+    with open(FILE_NAME, 'rb') as f:
+        chunk_start = 0
+        while chunk_start < file_size:
+            chunk_end = min(file_size, chunk_start + chunk_size)
+
+            while not is_new_line(chunk_end):
+                chunk_end -= 1
+
+            if chunk_end == chunk_start:
+                chunk_end = next_line(chunk_end)
+
+            chunks.append(ChunkRange(start=chunk_start, end=chunk_end))
+            chunk_start = chunk_end
+
+    return chunks
 
 
-def validate_measurement_row(row: str) -> tuple[str, float]:
-    name, temperature = row.split(";")
+def process_chunk(chunk: ChunkRange) -> dict:
+    result: dict[str, LocationAggregate] = {}
+    with open(FILE_NAME, 'rb') as f:
+        chunk_start = chunk.start
+        f.seek(chunk_start)
+        for line in f:
+            chunk_start += len(line)
+            if chunk_start > chunk.end:
+                break
 
-    # if not isinstance(name, str):
-    #     raise ValueError('station name is not string')
-    #
-    # try:
-    #     temperature = float(temperature)
-    # except ValueError:
-    #     raise ValueError(f'temperature for station={name} is not correct {temperature=}') from None
+            location, measurement = line.split(b';')
+            location = location.decode()
+            measurement = float(measurement)
+            if location not in result:
+                result[location] = LocationAggregate(
+                    minimum=measurement,
+                    maximum=measurement,
+                    current_sum=measurement,
+                    count=1
+                )
+            else:
+                current_aggregate = result[location]
+                if measurement > current_aggregate.maximum:
+                    current_aggregate.maximum = measurement
+                if measurement < current_aggregate.minimum:
+                    current_aggregate.minimum = measurement
 
-    return str(name), float(temperature)
+                current_aggregate.current_sum += measurement
+                current_aggregate.count += 1
 
-
-def put_measurements(que: mp.Queue, filename: str) -> None:
-    with open(filename, mode='r') as f:
-        batch = []
-        count = 0
-        for row in f:
-            name, temperature = validate_measurement_row(row)
-            batch.append(Station(name=name, temperature=temperature))
-            count += 1
-
-            if count == BATCH_SIZE:
-                que.put_nowait(batch)
-                batch = []
-                count = 0
-
-        if batch:
-            que.put_nowait(batch)
-
-    for _ in range(MAX_WORKERS):
-        que.put_nowait(DONE)
-
-    return
-
-
-def calc_measurement_batch(stations: list[Station]):
-    result: Result = {}
-    for station in stations:
-        if station.name not in result:
-            result[station.name] = StationAggData(
-                minimum=station.temperature,
-                maximum=station.temperature,
-                current_sum=station.temperature,
-                count=1
-            )
-            continue
-
-        calc_data = result[station.name]
-        if station.temperature < calc_data.minimum:
-            result[station.name].minimum = station.temperature
-        if station.temperature > calc_data.maximum:
-            result[station.name].maximum = station.temperature
-
-        result[station.name].current_sum += station.temperature
-        result[station.name].count += 1
+                result[location] = current_aggregate
 
     return result
 
 
-def calc_measurement(que_in: mp.Queue[list[Station]], que_out: mp.Queue[Result]):
-    while True:
-        stations = que_in.get()
-        if stations is DONE:
-            break
+def process_chunks(chunks):
+    result: dict[str, LocationAggregate] = {}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
+        for future in concurrent.futures.as_completed(futures):
+            chunk_result = future.result()
 
-        result = calc_measurement_batch(stations)
-        que_out.put_nowait(result)
+            for name, chunk_aggregate in chunk_result.items():
+                if name in result:
+                    current_aggregate = result[name]
+                else:
+                    current_aggregate = LocationAggregate(
+                        minimum=float('inf'), maximum=float('-inf'), current_sum=0.0, count=0
+                    )
+
+                if chunk_aggregate.maximum > current_aggregate.maximum:
+                    current_aggregate.maximum = chunk_aggregate.maximum
+                if chunk_aggregate.minimum < current_aggregate.minimum:
+                    current_aggregate.minimum = chunk_aggregate.minimum
+
+                current_aggregate.current_sum += chunk_aggregate.current_sum
+                current_aggregate.count += chunk_aggregate.count
+
+                result[name] = current_aggregate
+
+    return result
 
 
-def print_result(result: Result) -> None:
+def print_result(result: dict[str, LocationAggregate]) -> None:
     print("{", end="")
-    for station_name, result_data in sorted(result.items()):
-        average = result_data.current_sum / result_data.count if result_data.count != 0 else 0
-        print(f"{station_name}={result_data.minimum:.1f}/{average:.1f}/{result_data.maximum:.1f}", end=", ")
+    for name, location_aggregate in sorted(result.items()):
+        average = location_aggregate.current_sum / location_aggregate.count if location_aggregate.count != 0 else 0
+        print(f"{name}={location_aggregate.minimum:.1f}/{average:.1f}/{location_aggregate.maximum:.1f}", end=", ")
 
     print("\b\b} ")
 
 
-def process_measurements(que_in: mp.Queue, que_out: mp.Queue):
-    procs = []
-    for worker in range(MAX_WORKERS):
-        proc = mp.Process(target=calc_measurement, args=(que_in, que_out), name=f'worker-{worker + 1}')
-        procs.append(proc)
-        proc.start()
+def main():
+    start_time = time.perf_counter()
 
-    for proc in procs:
-        proc.join()
-
-    que_out.put_nowait(DONE)
-
-
-def combine_measurements(que_out: mp.Queue[Result]) -> Result:
-    result: Result = {}
-    while True:
-        batch_result = que_out.get()
-        if batch_result is DONE:
-            break
-
-        for station_name, batch_agg_data in batch_result.items():
-            if station_name not in result:
-                result[station_name] = batch_agg_data
-                continue
-
-            curr_agg_data = result[station_name]
-            if batch_agg_data.minimum < curr_agg_data.minimum:
-                curr_agg_data.minimum = batch_agg_data.minimum
-            if batch_agg_data.maximum > curr_agg_data.maximum:
-                curr_agg_data.maximum = batch_agg_data.maximum
-
-            curr_agg_data.current_sum += batch_agg_data.current_sum
-            curr_agg_data.count += batch_agg_data.count
-
-    return result
-
-
-def main() -> int:
-    que_in = mp.Queue(maxsize=50)
-    put_measurements_proc = mp.Process(
-        target=put_measurements, args=(que_in, "measurements_medium.txt"), name='put-measurements'
-    )
-    put_measurements_proc.start()
-
-    que_out = mp.Queue(maxsize=50)
-    process_measurements_proc = mp.Process(
-        target=process_measurements, args=(que_in, que_out), name='process-measurements'
-    )
-    process_measurements_proc.start()
-
-    result = combine_measurements(que_out)
-
-    put_measurements_proc.join()
-    process_measurements_proc.join()
-
+    chunks = get_chunks()
+    result = process_chunks(chunks)
     print_result(result)
-    return 0
+
+    print(f'duration: {(time.perf_counter() - start_time):.2f} seconds')
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
